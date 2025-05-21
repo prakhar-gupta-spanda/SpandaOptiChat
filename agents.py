@@ -1,13 +1,15 @@
 import copy
 import time
 from typing import Dict, Optional, Union, List
-from openai import Client, OpenAI
+# from openai import Client, OpenAI
+from inference_engines import invoke_llm
 from prompts import get_prompts
 from internal_tools import feasibility_restoration, sensitivity_analysis, components_retrival, evaluate_modification
 from internal_tools import syntax_guidance, fnArgsDecoder
 from extractor import extract_component_descriptions, insert_code, run_with_exec
 import json
 import re
+import asyncio
 #import streamlit as st
 
 
@@ -56,19 +58,26 @@ class Agent:
         #     print(f'{message["role"]}: {message["content"]}')
         # print("=" * 10)
 
-        if type(self.client) in [OpenAI, Client]:
-            completion = self.client.chat.completions.create(
-                model=self.llm,
-                messages=messages,
-                seed=seed,
-                stream=stream,
-            )
+        # if type(self.client) in [OpenAI, Client]:
+        #     completion = self.client.chat.completions.create(
+        #         model=self.llm,
+        #         messages=messages,
+        #         seed=seed,
+        #         stream=stream,
+        #     )
 
-            if stream:
-                return completion
-            else:
-                content = completion.choices[0].message.content
-                return content
+        completion = asyncio.run(invoke_llm(
+            messages=messages,
+            # seed=seed,
+            # temperature=temperature,
+            # response_format=response_format,
+            stream=stream,
+        ))
+        if stream:
+            return completion
+        else:
+            content = completion['answer']
+            return content
 
     @staticmethod
     def generate_pseudo_messages(messages: List[Dict], team_conversation: List[Dict],
@@ -126,29 +135,37 @@ class Agent:
         else:
             response_format = {"type": "text"}
 
-        if type(self.client) in [OpenAI, Client]:
-            completion = self.client.chat.completions.create(
-                model=self.llm,
-                messages=messages,
-                seed=seed,
-                temperature=temperature,
-                response_format=response_format,
-                stream=stream,
-                )
+        # if type(self.client) in [OpenAI, Client]:
+        #     completion = self.client.chat.completions.create(
+        #         model=self.llm,
+        #         messages=messages,
+        #         seed=seed,
+        #         temperature=temperature,
+        #         response_format=response_format,
+        #         stream=stream,
+        #         )
 
-            if stream:
-                return completion
-            else:
-                content = completion.choices[0].message.content
-                return content
+        completion = asyncio.run(invoke_llm(
+            messages=messages,
+            # seed=seed,
+            # temperature=temperature,
+            # response_format=response_format,
+            stream=stream,
+        ))
+        if stream:
+            return completion
+        else:
+            # content = completion.choices[0].message.content
+            content = completion['answer']
+            return content
 
 
 class Interpreter(Agent):
-    def __init__(self, client: Client, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(
             name="Interpreter",
             description="This is an operations research agent that is an expert in interpreting optimization models and codes to non-experts.",
-            client=client,
+            # client=client,
             **kwargs,
         )
 
@@ -399,13 +416,13 @@ class Interpreter(Agent):
 
 class Coordinator(Agent):
     def __init__(
-        self, client: Client, agents: [Agent], max_rounds: int = 5, **kwargs
+        self, agents: [Agent], max_rounds: int = 5, **kwargs
     ):
         super().__init__(
             name="Coordinator",
             description="This is a coordinator agent that chooses which agent to work on the problem next and organizes "
                         "the conversation within its team. ",
-            client=client,
+            # client=client,
             **kwargs,
         )
 
@@ -547,12 +564,12 @@ class Coordinator(Agent):
 
 class Explainer(Agent):
     def __init__(
-        self, client: Client, max_rounds: int = 5, **kwargs
+        self, max_rounds: int = 5, **kwargs
     ):
         super().__init__(
             name="Explainer",
             description="This is an explainer agent whose task is to either (1) directly answer user queries if the questions can be analyzed through natural language only, or (2) summarize the technical feedback obtained from engineers to answer user queries",
-            client=client,
+            # client=client,
             **kwargs,
         )
         self.explanation_time = 0
@@ -571,13 +588,13 @@ class Explainer(Agent):
 
 
 class Engineer(Agent):
-    def __init__(self, client: Client, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(
             name="Engineer",
             description="This is an engineer agent whose task is to execute tools and functions when user's query requires an interaction with optimization model. The engineer agent provides technical feedback instead of natural-language explanations."
                         "Note that some ‘why’ questions are better answered with technical feedback."
                         "These questions often involve scenarios that differ from the current model.",
-            client=client,
+            # client=client,
             **kwargs,
         )
 
@@ -683,26 +700,33 @@ class Engineer(Agent):
                 raise Exception("Invalid mode!")
             tool_choice = "required"
 
-        if type(self.client) in [OpenAI, Client]:
-            completion = self.client.chat.completions.create(
-                model=self.llm,
-                messages=messages,
-                seed=seed,
-                temperature=temperature,
-                tools=tools,
-                tool_choice=tool_choice
-            )
-            if completion.choices[0].message.tool_calls:
-                # internal tool is called
-                fn_call = completion.choices[0].message.tool_calls[0].function
-                fn_name = fn_call.name
-                fn_args = fn_call.arguments
-                print(f'function name = {fn_name}')
-                print(f'function arguments = {fn_args}')
-            else:
-                raise Exception("No tool call executed by Operator, perhaps because of the 'auto' tool choice!")
+        # if type(self.client) in [OpenAI, Client]:
+            # completion = self.client.chat.completions.create(
+            #     model=self.llm,
+            #     messages=messages,
+            #     seed=seed,
+            #     temperature=temperature,
+            #     tools=tools,
+            #     tool_choice=tool_choice
+            # )
+        completion = asyncio.run(invoke_llm(
+            messages=messages,
+            # seed=seed,
+            # temperature=temperature,
+            # tools=tools,
+            # tool_choice=tool_choice
+        ))
+        if completion.choices[0].message.tool_calls:
+            # internal tool is called
+            fn_call = completion.choices[0].message.tool_calls[0].function
+            fn_name = fn_call.name
+            fn_args = fn_call.arguments
+            print(f'function name = {fn_name}')
+            print(f'function arguments = {fn_args}')
         else:
-            raise Exception("Client type not supported!")
+            raise Exception("No tool call executed by Operator, perhaps because of the 'auto' tool choice!")
+        # else:
+        #     raise Exception("Client type not supported!")
         return fn_name, fn_args
 
     def generate_syntax_exp(self, args, messages, team_conversation, models_dict):

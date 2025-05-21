@@ -1,10 +1,11 @@
 import streamlit as st
-from openai import OpenAI
+# from openai import OpenAI
+from inference_engines import invoke_llm
 import os
-from io import StringIO
+# from io import StringIO
 import time
-import tempfile
-import io
+# import tempfile
+# import io
 from extractor import initial_loading
 from extractor import update_model_representation, get_skipJSON, feed_skipJSON
 from utils import get_agents
@@ -19,8 +20,8 @@ def string_generator(long_string, chunk_size=50):
         time.sleep(0.1)  # Optionally add a small delay between each yield
 
 
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-st.session_state['client'] = client
+# client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+st.session_state['client'] = None
 st.session_state['temperature'] = 0.1  # by default
 st.session_state['json_mode'] = True  # by default
 st.session_state['illustration_stream'] = True  # by default
