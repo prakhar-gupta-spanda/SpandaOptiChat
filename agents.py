@@ -2,7 +2,7 @@ import copy
 import time
 from typing import Dict, Optional, Union, List
 # from openai import Client, OpenAI
-from inference_engines import invoke_llm
+from inference_engines import SpandaLLM
 from prompts import get_prompts
 from internal_tools import feasibility_restoration, sensitivity_analysis, components_retrival, evaluate_modification
 from internal_tools import syntax_guidance, fnArgsDecoder
@@ -20,7 +20,7 @@ class Agent:
         self.client = client
         self.system_prompt = "You're a helpful assistant."
         self.kwargs = kwargs
-        self.llm = llm
+        self.llm = SpandaLLM()
 
         self.function_names = kwargs.get('function_names', None)
         self.tools = kwargs.get('tools', None)
@@ -33,6 +33,36 @@ class Agent:
 
         self.team_conversation_filename = './logs/team_conversation.txt'
         self.chat_history_filename = './logs/detailed_chat_history.txt'
+
+    def async_gen_to_sync_iter(self, async_gen, process_fn=lambda x: x.content):
+        import threading
+        from queue import Queue
+        """Run async generator in background and yield synchronously with processing."""
+        q = Queue()
+        stop_token = object()
+        async def consume():
+            try:
+                async for item in async_gen:
+                    q.put(process_fn(item))
+            except Exception as e:
+                print(f"[consume] Error: {e}")
+            finally:
+                try:
+                    await async_gen.aclose()
+                except Exception as e:
+                    print(f"[consume] Failed to close async generator: {e}")
+                q.put(stop_token)
+        def runner():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(consume())
+        threading.Thread(target=runner, daemon=True).start()
+        while True:
+            item = q.get()
+            if item is stop_token:
+                break
+            yield item
+    
 
     def llm_call(self, prompt: Optional[str] = None, messages: Optional[List] = None,
                  seed: int = 10, stream: bool = False) -> str:
@@ -52,31 +82,25 @@ class Agent:
                 {"role": "user", "content": prompt},
             ]
 
-        # print("=" * 10)
-        # print(f'llm_call is called, the following messages are sent to the llm: ')
-        # for message in messages:
-        #     print(f'{message["role"]}: {message["content"]}')
-        # print("=" * 10)
-
-        # if type(self.client) in [OpenAI, Client]:
-        #     completion = self.client.chat.completions.create(
-        #         model=self.llm,
-        #         messages=messages,
-        #         seed=seed,
-        #         stream=stream,
-        #     )
-
-        completion = asyncio.run(invoke_llm(
-            messages=messages,
-            # seed=seed,
-            # temperature=temperature,
-            # response_format=response_format,
-            stream=stream,
-        ))
         if stream:
+            completion = (self.llm.astream(
+                input=messages,
+                # seed=seed,
+                # temperature=temperature,
+                # response_format=response_format,
+                stream=stream,
+            ))
+            completion = self.async_gen_to_sync_iter(completion)
             return completion
         else:
-            content = completion['answer']
+            completion = asyncio.run(self.llm.ainvoke(
+                input=messages,
+                # seed=seed,
+                # temperature=temperature,
+                # response_format=response_format,
+                stream=stream,
+            ))
+            content = completion.content
             return content
 
     @staticmethod
@@ -135,28 +159,25 @@ class Agent:
         else:
             response_format = {"type": "text"}
 
-        # if type(self.client) in [OpenAI, Client]:
-        #     completion = self.client.chat.completions.create(
-        #         model=self.llm,
-        #         messages=messages,
-        #         seed=seed,
-        #         temperature=temperature,
-        #         response_format=response_format,
-        #         stream=stream,
-        #         )
-
-        completion = asyncio.run(invoke_llm(
-            messages=messages,
-            # seed=seed,
-            # temperature=temperature,
-            # response_format=response_format,
-            stream=stream,
-        ))
         if stream:
+            completion = (self.llm.astream(
+                input=messages,
+                # seed=seed,
+                # temperature=temperature,
+                # response_format=response_format,
+                stream=stream,
+            ))
+            completion = self.async_gen_to_sync_iter(completion)
             return completion
         else:
-            # content = completion.choices[0].message.content
-            content = completion['answer']
+            completion = asyncio.run(self.llm.ainvoke(
+                input=messages,
+                # seed=seed,
+                # temperature=temperature,
+                # response_format=response_format,
+                stream=stream,
+            ))
+            content = completion.content
             return content
 
 
@@ -186,118 +207,6 @@ class Interpreter(Agent):
     def _cut(self, component_type):
         if component_type in self.interpretation_json_template["components"]:
             del self.interpretation_json_template["components"][component_type]
-
-    def generate_interpretation(self, models_dict: Dict, code: str, model_name="model_1"):
-        task_complete = False
-        cnt = 3
-        while not task_complete and cnt > 0:
-            self._init_prompt_template()
-            cat_need2describe_prompt = ""
-            need2describe = {}
-            for component_type in ['sets', 'parameters', 'variables', 'constraints', 'objective']:
-                need2describe[component_type] = []
-                for key, value in models_dict[model_name]["components"][component_type].items():
-                    if value.get('description') in ['None', None]:
-                        need2describe[component_type].append(key)
-                # if there are components that haven't been described, add them to the prompt
-                if len(need2describe[component_type]) > 0:
-                    cat_need2describe_prompt = self._cat(cat_need2describe_prompt,
-                                                         need2describe[component_type], component_type)
-                else:
-                    self._cut(component_type)
-                # print('===' * 10)
-                # print('cat_need2describe_prompt:', cat_need2describe_prompt)
-                # print(f'interpretation_json_template: {self.interpretation_json_template}')
-
-            if len(cat_need2describe_prompt) > 0:
-                model_interpretation_json = json.dumps(self.interpretation_json_template, indent=4)
-                # create complete prompt with components that haven't been described only
-                prompt = self.interpretation_prompt_template.format(code=code,
-                                                                    cat_need2describe_prompt=cat_need2describe_prompt,
-                                                                    model_interpretation_json=model_interpretation_json)
-            else:
-                # if all the components in all the component types have been described, then no need to call interpreter
-                return models_dict
-
-            cnt -= 1
-            try:
-                interpretation_json = self.llm_call(prompt=prompt, seed=cnt, stream=False)
-                print("=" * 10)
-                print(f'generate_interpretation... cnt left = {cnt}/3')
-                print(interpretation_json)
-                print("=" * 10)
-                output = interpretation_json
-                # delete until the first '```json'
-                if "```json" in output:
-                    output = output[output.find("```json") + 7:]
-                    output = output[: output.rfind("```")]
-
-                start = output.find("{")
-                end = output.rfind("}")
-                output = output[start:end + 1]
-
-                update = json.loads(output)
-
-                task_complete = True  # mark as complete first, if any component incorrect, mark as incomplete
-                for key in update["components"]:
-                    print(f'Interpreting {key}')
-                    for component in update["components"][key]:
-                        print(f'component: {component}')
-                        # update models_dict with the new descriptions if format is correct,
-                        # next time less components will be included in the prompt
-                        if ('name' in component) and ('description' in component):
-                            models_dict[model_name]["components"][key][component["name"]]["description"] = component[
-                                "description"]
-                        else:
-                            print(f'Invalid component format marked!, {component}')
-                            task_complete = False
-
-            except Exception as e:
-                import traceback
-
-                print(traceback.format_exc())
-                print("=" * 10)
-                print(f'generate_interpretation error... cnt left = {cnt}/3')
-                print(e)
-                print("=" * 10)
-                print(f'generate_interpretation prompt that caused the error: ')
-                print(prompt)
-                print("=" * 10)
-                print(interpretation_json)
-                print("=" * 10)
-                print(
-                    f"Invalid json format!\n{e}\n Try again ..."
-                )
-        if cnt == 0:
-            raise Exception("Invalid json format, Failed 3 times!")
-        return models_dict
-
-    def generate_illustration(self, model_representation: Dict):
-        prompt = self.illustration_prompt_template.format(
-            json_representation=model_representation)
-        print("=" * 10)
-        print(f'generate_illustration... ')
-        print("=" * 10)
-        stream = self.llm_call(prompt=prompt, stream=True)
-        return stream
-
-    def generate_inference(self, model_representation: Dict):
-        def split_representation(representation):
-            # just split session_state.models_dict["model_representation"] into two parts
-            reduced_json_representation = copy.deepcopy(representation)
-            del reduced_json_representation["iis"]
-            del reduced_json_representation["iis_description"]
-            return representation["iis_description"], reduced_json_representation
-
-        iis_info, reduced_model_representation = split_representation(model_representation)
-        prompt = self.inference_prompt_template.format(
-            iis_info=iis_info,
-            json_representation=reduced_model_representation)
-        print("=" * 10)
-        print(f'generate_inference... ')
-        print("=" * 10)
-        stream = self.llm_call(prompt=prompt, stream=True)
-        return stream
 
     def generate_interpretation_exp(self, args, models_dict: Dict, code: str, model_name="model_1"):
         task_complete = False
@@ -336,13 +245,8 @@ class Interpreter(Agent):
                                                         json_mode=args.json_mode, stream=False)
                 print("=" * 10)
                 print(f'generate_interpretation... cnt left = {cnt}/3')
-                print(interpretation_json)
                 print("=" * 10)
                 output = interpretation_json
-
-                # print("=" * 10 + 'debug: for testing json mode only' + "=" * 10)
-                # print(output)
-                # print("=" * 10)
 
                 # delete until the first '```json'
                 if "```json" in output:
@@ -446,69 +350,6 @@ class Coordinator(Agent):
                 for agent in self.agents
             ]
         )
-
-    def generate_decision(self, messages, team_conversation, agent_name, task):
-        status = 'In Progress'
-
-        coordinate_prompt = self.prompt_template.format(agents=self.agents_list)
-        pseudo_messages = self.generate_pseudo_messages(messages, team_conversation, coordinate_prompt)
-
-        cnt = 3
-        while cnt > 0:
-            try:
-                response = self.llm_call(messages=pseudo_messages, seed=cnt)
-                decision = response.strip()
-                if "```json" in decision:
-                    decision = decision.split("```json")[1].split("```")[0]
-                decision = decision.replace("\\", "")
-
-                self.print_in_and_out(coordinate_prompt, response)
-                print('Decision:', decision)
-
-                decision = json.loads(decision)
-
-                if team_conversation:
-                    # safeguard to prevent the coordinator from calling the agent
-                    # after the user's query has been answered by explainer
-                    if team_conversation[-1]["agent_name"] == "Explainer":
-                        status = 'Completed'
-                        OptiChat_out = team_conversation[-1]['agent_response']
-                        if "DONE" in decision.values():
-                            print("DONE, the user's query is answered.")
-                        else:
-                            print("DONE, the user's query is answered, though the coordinator did not output 'DONE'.")
-                        return status, OptiChat_out
-                    if "DONE" in decision.values() and team_conversation[-1]["agent_name"] == "Engineer":
-                        decision = {'agent_name': 'Explainer', 'task': 'explain the technical feedback'}
-
-                else:
-                    # the first round of the conversation
-                    if "DONE" in decision.values():
-                        # sometimes user does not ask a question (e.g. saying 'thank you')
-                        # and coordinator considers no query there and outputs 'DONE' directly
-                        decision = {'agent_name': 'Explainer', 'task': 'respond to the user'}
-
-                agent_name.text(decision["agent_name"])
-                task.text(decision["task"])
-
-                return status, decision
-
-            except Exception as e:
-                print(e)
-                cnt -= 1
-                print("Invalid decision. Trying again ...")
-
-                task.text(f'distribution failed ({cnt}/3)')
-
-                if cnt == 0:
-                    import traceback
-                    err = traceback.format_exc()
-                    print(err)
-
-                    status = 'Terminated'
-                    OptiChat_out = "LLM failed to assign tasks to experts! \n" + "Error: " + err + "\n"
-
-                    return status, OptiChat_out
 
     def generate_decision_exp(self, args, messages, team_conversation):
         self._init_cnt()
@@ -663,71 +504,71 @@ class Engineer(Agent):
         self.fake_team_conversation.append({"agent_name": 'Execution result', "agent_response": execution_rst})
         return src_code, execution_rst
 
-    def tool_call_exp(self, prompt: Optional[str] = None, messages: Optional[List] = None,
-                      seed: int = 10, temperature: float = 0.1,
-                      is_syntax_guidance: bool = False,
-                      syntax_mode: str = 'none'):
+    # def tool_call_exp(self, prompt: Optional[str] = None, messages: Optional[List] = None,
+    #                   seed: int = 10, temperature: float = 0.1,
+    #                   is_syntax_guidance: bool = False,
+    #                   syntax_mode: str = 'none'):
 
-        # make sure exactly one of prompt or messages is provided
-        assert (prompt is None) != (messages is None)
-        # make sure if messages is provided, it is a list of dicts with role and content
-        if messages is not None:
-            assert isinstance(messages, list)
-            for message in messages:
-                assert isinstance(message, dict)
-                assert "role" in message
-                assert "content" in message
+    #     # make sure exactly one of prompt or messages is provided
+    #     assert (prompt is None) != (messages is None)
+    #     # make sure if messages is provided, it is a list of dicts with role and content
+    #     if messages is not None:
+    #         assert isinstance(messages, list)
+    #         for message in messages:
+    #             assert isinstance(message, dict)
+    #             assert "role" in message
+    #             assert "content" in message
 
-        if not prompt is None:
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": prompt},
-            ]
+    #     if not prompt is None:
+    #         messages = [
+    #             {"role": "system", "content": self.system_prompt},
+    #             {"role": "user", "content": prompt},
+    #         ]
 
-        if is_syntax_guidance:
-            tools = self.syntax_guidance_tool
-            tool_choice = {"type": "function", "function": {"name": "syntax_guidance"}}
-        else:
-            if syntax_mode == 'multiple':
-                tools = self.multiple_tools
-            elif syntax_mode == 'single':
-                tools = self.single_tools
-            elif syntax_mode == 'none':
-                tools = self.none_tools
-            elif syntax_mode == 'all':
-                tools = self.all_tools
-            else:
-                raise Exception("Invalid mode!")
-            tool_choice = "required"
+    #     if is_syntax_guidance:
+    #         tools = self.syntax_guidance_tool
+    #         tool_choice = {"type": "function", "function": {"name": "syntax_guidance"}}
+    #     else:
+    #         if syntax_mode == 'multiple':
+    #             tools = self.multiple_tools
+    #         elif syntax_mode == 'single':
+    #             tools = self.single_tools
+    #         elif syntax_mode == 'none':
+    #             tools = self.none_tools
+    #         elif syntax_mode == 'all':
+    #             tools = self.all_tools
+    #         else:
+    #             raise Exception("Invalid mode!")
+    #         tool_choice = "required"
 
-        # if type(self.client) in [OpenAI, Client]:
-            # completion = self.client.chat.completions.create(
-            #     model=self.llm,
-            #     messages=messages,
-            #     seed=seed,
-            #     temperature=temperature,
-            #     tools=tools,
-            #     tool_choice=tool_choice
-            # )
-        completion = asyncio.run(invoke_llm(
-            messages=messages,
-            # seed=seed,
-            # temperature=temperature,
-            # tools=tools,
-            # tool_choice=tool_choice
-        ))
-        if completion.choices[0].message.tool_calls:
-            # internal tool is called
-            fn_call = completion.choices[0].message.tool_calls[0].function
-            fn_name = fn_call.name
-            fn_args = fn_call.arguments
-            print(f'function name = {fn_name}')
-            print(f'function arguments = {fn_args}')
-        else:
-            raise Exception("No tool call executed by Operator, perhaps because of the 'auto' tool choice!")
-        # else:
-        #     raise Exception("Client type not supported!")
-        return fn_name, fn_args
+    #     # if type(self.client) in [OpenAI, Client]:
+    #         # completion = self.client.chat.completions.create(
+    #         #     model=self.llm,
+    #         #     messages=messages,
+    #         #     seed=seed,
+    #         #     temperature=temperature,
+    #         #     tools=tools,
+    #         #     tool_choice=tool_choice
+    #         # )
+    #     completion = asyncio.run(invoke_llm(
+    #         messages=messages,
+    #         # seed=seed,
+    #         # temperature=temperature,
+    #         # tools=tools,
+    #         # tool_choice=tool_choice
+    #     ))
+    #     if completion.choices[0].message.tool_calls:
+    #         # internal tool is called
+    #         fn_call = completion.choices[0].message.tool_calls[0].function
+    #         fn_name = fn_call.name
+    #         fn_args = fn_call.arguments
+    #         print(f'function name = {fn_name}')
+    #         print(f'function arguments = {fn_args}')
+    #     else:
+    #         raise Exception("No tool call executed by Operator, perhaps because of the 'auto' tool choice!")
+    #     # else:
+    #     #     raise Exception("Client type not supported!")
+    #     return fn_name, fn_args
 
     def generate_syntax_exp(self, args, messages, team_conversation, models_dict):
         while not self.syntax_success and self.syntax_cnt > 0:
@@ -744,9 +585,9 @@ class Engineer(Agent):
             self.syntax_cnt -= 1
             try:
                 syntax_start = time.time()
-                fn_name, fn_args = self.tool_call_exp(messages=pseudo_messages,
+                fn_name, fn_args = asyncio.run(self.tool_call_exp(messages=pseudo_messages,
                                                       seed=self.syntax_cnt, temperature=args.temperature,
-                                                      is_syntax_guidance=True)
+                                                      is_syntax_guidance=True))
                 syntax_end = time.time()
                 self.syntax_time += (syntax_end - syntax_start)
 
@@ -777,10 +618,10 @@ class Engineer(Agent):
             self.operator_cnt -= 1
             try:
                 syntax_start = time.time()
-                fn_name, fn_args = self.tool_call_exp(messages=pseudo_messages,
+                fn_name, fn_args = asyncio.run(self.tool_call_exp(messages=pseudo_messages,
                                                       seed=self.operator_cnt, temperature=args.temperature,
                                                       is_syntax_guidance=False,
-                                                      syntax_mode=syntax_mode)
+                                                      syntax_mode=syntax_mode))
                 syntax_end = time.time()
                 self.syntax_time += (syntax_end - syntax_start)
 
@@ -913,13 +754,16 @@ class Engineer(Agent):
                     return code_output, execution_rst, evaluation_output
 
     def generate_report_exp(self, args, messages, team_conversation, models_dict):
+        print('called it')
         self._init_cnt()
 
         if args.external_experiment:
             syntax_output, syntax_mode = 'external_tools', 'none'
             self.syntax_success = True
         else:
+            print('called it2')
             syntax_output, syntax_mode = self.generate_syntax_exp(args, messages, team_conversation, models_dict)
+        print(syntax_output, syntax_mode)
 
         if not self.syntax_success:
             team_conversation.append({"agent_name": 'Syntax reminder', "agent_response": syntax_output})
@@ -964,3 +808,69 @@ class Engineer(Agent):
         pseudo_messages = self.generate_pseudo_messages(messages, [], prompt)
         pass_or_fail = self.llm_call_exp(messages=pseudo_messages, temperature=args.temperature, stream=False)
         return pass_or_fail
+    
+    def tool_call_exp(self, prompt: Optional[str] = None, messages: Optional[List] = None,
+                      seed: int = 10, temperature: float = 0.1,
+                      is_syntax_guidance: bool = False,
+                      syntax_mode: str = 'none'):
+
+        # make sure exactly one of prompt or messages is provided
+        assert (prompt is None) != (messages is None)
+        # make sure if messages is provided, it is a list of dicts with role and content
+        if messages is not None:
+            assert isinstance(messages, list)
+            for message in messages:
+                assert isinstance(message, dict)
+                assert "role" in message
+                assert "content" in message
+
+        if not prompt is None:
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+
+        if is_syntax_guidance:
+            tools = self.syntax_guidance_tool
+            tool_choice = {"type": "function", "function": {"name": "syntax_guidance"}}
+        else:
+            if syntax_mode == 'multiple':
+                tools = self.multiple_tools
+            elif syntax_mode == 'single':
+                tools = self.single_tools
+            elif syntax_mode == 'none':
+                tools = self.none_tools
+            elif syntax_mode == 'all':
+                tools = self.all_tools
+            else:
+                raise Exception("Invalid mode!")
+            tool_choice = "required"
+
+        # if type(self.client) in [OpenAI, Client]:
+            # completion = self.client.chat.completions.create(
+            #     model=self.llm,
+            #     messages=messages,
+            #     seed=seed,
+            #     temperature=temperature,
+            #     tools=tools,
+            #     tool_choice=tool_choice
+            # )
+        completion = asyncio.run(invoke_llm(
+            messages=messages,
+            # seed=seed,
+            # temperature=temperature,
+            # tools=tools,
+            # tool_choice=tool_choice
+        ))
+        if completion.choices[0].message.tool_calls:
+            # internal tool is called
+            fn_call = completion.choices[0].message.tool_calls[0].function
+            fn_name = fn_call.name
+            fn_args = fn_call.arguments
+            print(f'function name = {fn_name}')
+            print(f'function arguments = {fn_args}')
+        else:
+            raise Exception("No tool call executed by Operator, perhaps because of the 'auto' tool choice!")
+        # else:
+        #     raise Exception("Client type not supported!")
+        return fn_name, fn_args

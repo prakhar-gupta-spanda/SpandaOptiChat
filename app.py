@@ -1,11 +1,7 @@
 import streamlit as st
-# from openai import OpenAI
-from inference_engines import invoke_llm
+from inference_engines import SpandaLLM
 import os
-# from io import StringIO
 import time
-# import tempfile
-# import io
 from extractor import initial_loading
 from extractor import update_model_representation, get_skipJSON, feed_skipJSON
 from utils import get_agents
@@ -17,11 +13,11 @@ import json
 def string_generator(long_string, chunk_size=50):
     for i in range(0, len(long_string), chunk_size):
         yield long_string[i:i+chunk_size]
-        time.sleep(0.1)  # Optionally add a small delay between each yield
+        # time.sleep(0.1)  # Optionally add a small delay between each yield
 
 
 # client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-st.session_state['client'] = None
+st.session_state['client'] = SpandaLLM
 st.session_state['temperature'] = 0.1  # by default
 st.session_state['json_mode'] = True  # by default
 st.session_state['illustration_stream'] = True  # by default
@@ -35,8 +31,8 @@ st.set_page_config(layout='wide')
 st.title("OptiChat: Talk to your Optimization Model")
 
 
-gpt_model = st.sidebar.selectbox(label="GPT-Model", options=["gpt-4-turbo-preview", "gpt-4-turbo", "gpt-4-1106-preview", "gpt-4", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"], )
-st.session_state["gpt_model"] = gpt_model
+# gpt_model = st.sidebar.selectbox(label="GPT-Model", options=["gpt-4-turbo-preview", "gpt-4-turbo", "gpt-4-1106-preview", "gpt-4", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"], )
+# st.session_state["gpt_model"] = gpt_model
 # Set a default model
 if "gpt_model" not in st.session_state:
     st.session_state["gpt_model"] = "gpt-4-turbo-preview"
@@ -252,7 +248,7 @@ if prompt := st.chat_input("Enter your query here..."):
                                                                 st.session_state.Explainer,
                                                                 st.session_state.messages,
                                                                 st.session_state.models_dict)
-    print('OptiChat_out:', updated_messages)
+    print('OptiChat_out:', len(updated_messages))
     st.session_state.messages = updated_messages
 
     # # update detailed chat history

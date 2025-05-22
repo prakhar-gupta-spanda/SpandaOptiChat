@@ -171,7 +171,6 @@ async def stream_llm_vllm(ollama_model, prompt: Optional[str] = None, messages: 
         "seed": seed,
         "stream": True
     }
-    print(payload)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -294,3 +293,60 @@ async def stream_llm_ollama(ollama_model, prompt: Optional[str] = None, messages
 ##############################################################################################################################
 ################################################OLLAMA GENERATION FUNCTIONS STOP##############################################
 ##############################################################################################################################
+
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
+from langchain_core.runnables import RunnableConfig
+
+from typing import Optional, List, AsyncGenerator, Any
+
+
+class SpandaLLM(BaseChatModel):
+    """LangChain-compatible wrapper around custom async LLM interface (supports tools)."""
+    config: Optional[EnvConfig] = Field(default_factory=EnvConfig)
+    streaming: bool = False
+
+    @property
+    def _llm_type(self) -> str:
+        return "spanda-llm"
+
+    async def _astream(self, messages: List[Any], stop: Optional[List[str]] = None, **kwargs) -> AsyncGenerator[AIMessage, None]:
+        """Stream responses from the underlying model."""
+        content = ""
+        async for chunk in stream_llm(messages=messages, config=self.config):
+            content += chunk
+            yield AIMessage(content=chunk)
+        # Final full message
+        yield AIMessage(content=content)
+
+    async def _agenerate(
+        self,
+        messages: List[Any],
+        stop: Optional[List[str]] = None,
+        **kwargs
+    ) -> ChatResult:
+        """Non-streaming response for a single generation."""
+        result = await invoke_llm(messages=messages, config=self.config, stream=False)
+
+        if "answer" in result:
+            msg = AIMessage(content=result["answer"])
+        else:
+            msg = AIMessage(content=f"Error: {result.get('error')}")
+
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    async def ainvoke(self, input: List[Any], config: Optional[RunnableConfig] = None, **kwargs) -> AIMessage:
+        """LangChain-style invoke support"""
+        result = await self._agenerate(input, **kwargs)
+        return result.generations[0].message
+
+    async def astream(self, input: List[Any], config: Optional[RunnableConfig] = None, **kwargs) -> AsyncGenerator[AIMessage, None]:
+        """LangChain-style astream support"""
+        async for msg in self._astream(input, **kwargs):
+            yield msg
+    
+    def _generate(self, messages: List[Any], stop: Optional[List[str]] = None, **kwargs) -> ChatResult:
+        raise NotImplementedError("Synchronous _generate is not supported. Use async methods.")
