@@ -11,6 +11,40 @@ demands_df = pd.read_csv(base_path / 'demands.csv')
 processing_df = pd.read_csv(base_path / 'processing.csv')
 transportation_df = pd.read_csv(base_path / 'transportation.csv')
 
+"""
+DDL OF EACH TABLE:
+
+CREATE TABLE demands (
+    node_id VARCHAR(50),    -- values store1, store2, store3, store4, store5, store6; store
+    product_type VARCHAR(50),   -- values cpu, gpu; type of product
+    demand INT,     -- demand for the product in units
+    revenue_per_unit INT,   -- revenue per unit sold
+    PRIMARY KEY (node_id, product_type)
+);
+
+
+CREATE TABLE processing (
+    node_id VARCHAR(50),    -- values fab1 to fab6, assembly1 to assembly4
+    node_type VARCHAR(50),  -- values supplier, processor; type of node
+    product_type VARCHAR(50),   -- values cpu, gpu; type of product
+    capacity INT,   -- capacity of the node in units
+    cost_per_unit INT,  -- cost per unit made
+    PRIMARY KEY (node_id, product_type)
+);
+
+
+CREATE TABLE transportation (
+    origin VARCHAR(50),     -- values fab1 to fab6, assembly1 to assembly4; origin node
+    destination VARCHAR(50),      -- values fab1 to fab6, assembly1 to assembly4, store1 to store6; destination node
+    product_type VARCHAR(50),   -- values cpu, gpu; type of product
+    cost_per_unit INT,  -- transportation cost per unit
+    capacity INT,   -- transportation capacity in units
+    PRIMARY KEY (origin, destination, product_type),
+    FOREIGN KEY (origin) REFERENCES processing(node_id),
+    FOREIGN KEY (product_type) REFERENCES demands(product_type)
+);
+"""
+
 model = ConcreteModel()
 
 # Sets
